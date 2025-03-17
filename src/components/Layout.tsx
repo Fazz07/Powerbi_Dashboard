@@ -3,6 +3,7 @@ import { Link, Outlet, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, Users, LineChart, FolderKanban } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { Menu } from 'lucide-react';
+import Chatbot from './Chatbot';
 
 export default function Layout() {
   // Authentication state management
@@ -134,6 +135,7 @@ export default function Layout() {
           </div>
         </main>
       </div>
+      <Chatbot />
     </div>
   );
 }

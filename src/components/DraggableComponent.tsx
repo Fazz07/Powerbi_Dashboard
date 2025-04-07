@@ -30,5 +30,4 @@ const SortableVisualComponent: React.FC<SortableVisualProps> = ({ id, title, chi
   );
 };
 
-// Use React.memo to avoid unnecessary re-renders
 export const SortableVisual = React.memo(SortableVisualComponent);

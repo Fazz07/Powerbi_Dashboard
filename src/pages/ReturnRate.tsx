@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as powerbi from 'powerbi-client';
 import { TrendingUp, DollarSign, Filter, ChevronDown } from 'lucide-react';
 import { parseData } from '../utils/utils';
+import { useAuthStore } from '../store/authStore';
 
 // Define interfaces for type safety
 interface EmbedData {
@@ -107,8 +108,30 @@ export default function ReturnRate() {
     store: false,
   });
 
+    // ********************************************
+  // New: Track rendered status for visible visuals
+  const [visualRendered, setVisualRendered] = useState<Record<string, boolean>>({
+    category: false,
+    store: false,
+  });
+  // ********************************************
+
   // Power BI service instance, initialized once
   const powerbiServiceRef = useRef<powerbi.service.Service | null>(null);
+
+      // Runs ONCE on mount to clear stale data
+      useEffect(() => {
+          console.log("ReturnRate.tsx mounted. Clearing potentially stale window/store data.");
+          delete (window as any).__powerBIData;
+          delete (window as any).__powerBIVisualInstances;
+          // delete (window as any).powerbi; // Optional
+          useAuthStore.getState().setVisualsLoaded(false); // Reset loading state
+          useAuthStore.getState().setMetrics({}); // Clear metrics from previous page
+          // Clear dashboard-specific parse states if they exist in the store
+          // useAuthStore.getState().setParsedComponent('none'); // If Returns doesn't use these
+          // useAuthStore.getState().setParsedComponentTwo('none');
+  
+      }, []);
 
   // Initialize Power BI service on component mount
   useEffect(() => {
@@ -194,7 +217,7 @@ export default function ReturnRate() {
     } catch (error) {
       console.error('Error embedding report for data extraction:', error);
     }
-  }, [embedData]);
+  }, [embedData, apiUrl]);
 
 
 /**
@@ -273,6 +296,23 @@ export default function ReturnRate() {
               const value = parseData(csvData);
               console.log(`Updated data for ${visualName}:`, value);
               stateSetter(value);
+      
+              // Get current metrics
+              const currentMetrics = useAuthStore.getState().metrics;
+              
+              // Update specific metric based on visual
+              if (visualName === '70748de9ae05c6029e25') {
+                useAuthStore.getState().setMetrics({
+                  ...currentMetrics,
+                  'Net Sales': value === "loading..." ? "N/A" : value
+                });
+              }
+              if (visualName === 'd4d72ae2a051be63470a') {
+                useAuthStore.getState().setMetrics({
+                  ...currentMetrics,
+                  'Extra Profit': value === "loading..." ? "N/A" : value
+                });
+              }
             })
             .catch((error) => {
               console.error(`Error exporting data from visual ${visualName}:`, error);
@@ -285,6 +325,16 @@ export default function ReturnRate() {
       }
     }
   };
+
+
+  
+  useEffect(() => {
+    return () => {
+      // Clear metrics when unmounting
+      useAuthStore.getState().setMetrics({});
+    };
+  }, []);
+  
 
 /**
  * Handles selections made in visuals and applies appropriate cross-filters
@@ -448,7 +498,7 @@ function embedVisualChart(
     visual.on('loaded', () => {
       console.log(`${visualKey} Visual Loaded`);
       
-      // Add data selection event handler with detailed logging
+      //  data selection event handler with detailed logging
       visual.on('dataSelected', (event) => {
         console.log(`Selection in ${visualKey}:`, event.detail);
         
@@ -462,6 +512,15 @@ function embedVisualChart(
         }
       });
     });
+
+          // ********************************************
+      // New: Listen for the 'rendered' event indicating that
+      // the visual has fully rendered with data.
+      visual.on('rendered', () => {
+        console.log(`${visualKey} Visual Rendered`);
+        setVisualRendered(prev => ({ ...prev, [visualKey]: true }));
+      });
+      // ********************************************
     
     visual.on('error', (event) => console.error(`${visualKey} Embed Error:`, event.detail));
 
@@ -478,7 +537,7 @@ function embedVisualChart(
 const clearCrossFilters = async (sourceVisualKey: string) => {
   console.log(`Clearing cross-filters from ${sourceVisualKey}`);
   
-  // Determine which visual to clear from (the one that wasn't clicked)
+  // Determine which visual to Clear from (the one that wasn't clicked)
   const targetVisualKey = sourceVisualKey === 'category' ? 'store' : 'category';
   
   // Reset filter state based on the visual that was cleared
@@ -513,7 +572,7 @@ const clearCrossFilters = async (sourceVisualKey: string) => {
   }
 };
 
-// Add a new function to handle double-click reset
+//  a new function to handle double-click reset
 const setupDoubleClickReset = () => {
   // For the category visual
   if (categoryRef.current) {
@@ -537,7 +596,7 @@ const resetAllFilters = async () => {
   setSelectedCategory("All");
   setSelectedStore("All");
   
-  // clear from all visuals
+  // Clear from all visuals
   const clearPromises = Object.entries(visualInstancesRef.current).map(async ([key, visual]) => {
     if (visual) {
       try {
@@ -556,7 +615,87 @@ const resetAllFilters = async () => {
   await extractDataWithCurrentFilters();
 };
 
-// Add this to the useEffect after both visuals are embedded
+
+// In ReturnRate.tsx, modify the useEffect that exposes PowerBI data
+useEffect(() => {
+
+  // Ensure embedData exists and the report instance is potentially ready
+  // Check visualInstancesRef only includes visuals relevant to THIS page
+  const relevantVisualsExist = visualInstancesRef.current.category || visualInstancesRef.current.store;
+
+  if (embedData && relevantVisualsExist) {
+    try {
+      //  visual name mapping
+      const visualNameMap = {
+        category: 'b33397810d555ca70a8c',
+        store: '805719ca6000cb000be2'
+      };
+
+      const visualConfigs = [
+        { key: 'category', title: 'Sales Analysis' },
+        { key: 'store', title: 'Forecast Analysis' },
+      ];
+
+      const powerBIData = {
+        pageName: 'ReturnRate',
+        reportId: embedData.reportId,
+        filters: [
+          { table: 'Store', column: 'Store', value: selectedCategory },
+          { table: 'Product', column: 'Segment', value: selectedStore }
+        ],
+        visuals: visualConfigs.map(config => ({
+          name: visualNameMap[config.key as keyof typeof visualNameMap], // Use actual PowerBI visual names
+          key: config.key,
+          title: config.title,
+          data: {
+            visualType: config.key,
+            visible: !!visualInstancesRef.current[config.key as 'category' | 'store']
+          }
+        }))
+      };
+
+      (window as any).__powerBIData = powerBIData;
+      // Expose only the instances relevant to the Returns page
+      (window as any).__powerBIVisualInstances = {
+          category: visualInstancesRef.current.category,
+          store: visualInstancesRef.current.store
+      };
+       if (powerbiServiceRef.current) {
+          (window as any).powerbi = powerbiServiceRef.current;
+      }
+      
+      console.log('ReturnRate: PowerBI data exposed to window:', powerBIData);
+    } catch (error) {
+      console.error('ReturnRate:Error exposing PowerBI data:', error);
+    }
+  }
+  // Cleanup function
+  return () => {
+    // This cleanup might run slightly after the next component's mount effect,
+    // but the mount effect should handle clearing. Still good practice to include.
+    console.log("Returns.tsx data exposure effect cleanup.");
+    // We already have unmount cleanup for metrics.
+    // The mount effect of the next component handles clearing window objects.
+    // No need to delete __powerBIData here again if the mount effect does it.
+  };
+// Re-run when filters change or embedData is ready
+}, [embedData, selectedCategory, selectedStore, visualRendered]); 
+
+
+useEffect(() => {
+  const allVisualsRendered = Object.values(visualRendered).every(Boolean);
+  if (allVisualsRendered) {
+    console.log('All PowerBI visuals loaded and rendered successfully!');
+    // If using a store for state management, update it here
+    useAuthStore.getState().setVisualsLoaded(true);
+  } else {
+    useAuthStore.getState().setVisualsLoaded(false);
+  }
+}, [visualRendered]);
+
+
+
+  
 useEffect(() => {
   // Check if both visuals are embedded
   if (embeddedVisuals['category'] && embeddedVisuals['store']) {
@@ -641,7 +780,6 @@ useEffect(() => {
     await extractDataWithCurrentFilters();
   };
   
-// Add this useEffect near the top of the component, after state declarations
 useEffect(() => {
   console.log('Filters changed - selectedCategory:', selectedCategory, 'selectedStore:', selectedStore);
   // Avoid initial render calls with "loading..." state
@@ -682,7 +820,7 @@ const handleStoreChange = (Segment: string) => {
     setSelectedCategory("All");
     setSelectedStore("All");
     
-    // clear from visible visuals
+    // Clear from visible visuals
     const clearPromises = Object.entries(visualInstancesRef.current).map(async ([key, visual]) => {
       if (visual) {
         try {
@@ -718,15 +856,17 @@ const handleStoreChange = (Segment: string) => {
   };
 
   return (
-    <div>
-      <div className="flex justify-between items-center mb-6 mt-[67px]">
-        <h1 className="text-4xl font-bold">Return Rate</h1>
+    <div className="w-full min-h-screen px-4 py-4">
+      {/* Header and Filter Section */}
+      <div className="flex flex-col sm:flex-row justify-between items-center mb-6">
+        <h1 className="text-4xl font-bold mb-4 sm:mb-0">Return Rate</h1>
         
         {/* Filter Buttons */}
         <div className="flex gap-2">
+          {/* Store Filter */}
           <div className="relative">
             <button 
-              className={`flex items-center px-4 py-2 rounded-md shadow-sm focus:outline-none ${
+              className={`flex items-center px-2 py-1 sm:px-4 sm:py-2 rounded-md shadow-sm focus:outline-none ${
                 activeFilterCategory === "Store" && showFilters
                   ? "bg-gray-600 text-white"
                   : "bg-gray-500 text-white hover:bg-gray-600"
@@ -742,11 +882,11 @@ const handleStoreChange = (Segment: string) => {
             {showFilters && activeFilterCategory === "Store" && (
               <div className="absolute right-0 mt-2 w-56 bg-white rounded-md shadow-lg z-10 border border-gray-200">
                 <div className="py-1">
-                  <h3 className="px-4 py-2 text-sm font-semibold text-gray-700 border-b">Select Store</h3>
+                  <h3 className="px-2 py-1 sm:px-4 sm:py-2 text-sm font-semibold text-gray-700 border-b">Select Store</h3>
                   {filterCategories[0].options.map(option => (
                     <button
                       key={option.id}
-                      className={`block w-full text-left px-4 py-2 text-sm ${
+                      className={`block w-full text-left px-2 py-1 sm:px-4 sm:py-2 text-sm ${
                         selectedCategory === option.value 
                           ? 'bg-gray-100 text-gray-800' 
                           : 'text-gray-700 hover:bg-gray-100'
@@ -761,9 +901,10 @@ const handleStoreChange = (Segment: string) => {
             )}
           </div>
           
+          {/* Segment Filter */}
           <div className="relative">
             <button 
-              className={`flex items-center px-4 py-2 rounded-md shadow-sm focus:outline-none ${
+              className={`flex items-center px-2 py-1 sm:px-4 sm:py-2 rounded-md shadow-sm focus:outline-none ${
                 activeFilterCategory === "Segment" && showFilters
                   ? "bg-gray-600 text-white"
                   : "bg-gray-500 text-white hover:bg-gray-600"
@@ -779,11 +920,11 @@ const handleStoreChange = (Segment: string) => {
             {showFilters && activeFilterCategory === "Segment" && (
               <div className="absolute right-0 mt-2 w-56 bg-white rounded-md shadow-lg z-10 border border-gray-200">
                 <div className="py-1">
-                  <h3 className="px-4 py-2 text-sm font-semibold text-gray-700 border-b">Select Segment</h3>
+                  <h3 className="px-2 py-1 sm:px-4 sm:py-2 text-sm font-semibold text-gray-700 border-b">Select Segment</h3>
                   {filterCategories[1].options.map(option => (
                     <button
                       key={option.id}
-                      className={`block w-full text-left px-4 py-2 text-sm ${
+                      className={`block w-full text-left px-2 py-1 sm:px-4 sm:py-2 text-sm ${
                         selectedStore === option.value 
                           ? 'bg-gray-100 text-gray-800' 
                           : 'text-gray-700 hover:bg-gray-100'
@@ -797,21 +938,23 @@ const handleStoreChange = (Segment: string) => {
               </div>
             )}
           </div>
-                    
-          {/* clear Button */}
+          
+          {/* Clear Button */}
           {(selectedCategory !== "All" || selectedStore !== "All") && (
             <button
-              className="bg-red-500 text-white px-4 py-2 rounded-md shadow-sm hover:bg-red-600 focus:outline-none"
+              className="bg-gray-500 text-white px-2 py-1 sm:px-4 sm:py-2 rounded-md shadow-sm hover:bg-gray-600 focus:outline-none"
               onClick={clearFilters}
             >
-              clear
+              Clear
             </button>
           )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <div className="bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300">
+  
+      {/* Metrics Section */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6 justify-items-center">
+        <div className="bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300 w-[230px] h-[100px] ml-12">
           <div className="flex items-center">
             <TrendingUp className="w-12 h-12 text-gray-500" />
             <div className="ml-4">
@@ -821,7 +964,8 @@ const handleStoreChange = (Segment: string) => {
           </div>
         </div>
 
-        <div className="ml-1 bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300 lg:col-start-3">
+  
+        <div className="bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300 w-[230px] h-[100px] lg:col-start-3 ml-14">
           <div className="flex items-center">
             <DollarSign className="w-12 h-12 text-gray-500" />
             <div className="ml-4">
@@ -831,33 +975,33 @@ const handleStoreChange = (Segment: string) => {
           </div>
         </div>
       </div>
-
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+  
+      {/* Visuals Section */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
         {/* Category Distribution Visual */}
-        <div className="bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300">
+        <div className="h-[300px] bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300">
           <h2 className="text-lg font-semibold mb-4">Sales Analysis</h2>
           <div
-            className="h-64 flex items-center justify-center bg-gray-100 rounded"
+            className="md:h-56 lg:h-[220px] flex items-center justify-center bg-gray-100 rounded"
             ref={categoryRef}
           >
             {!embedData && <p className="text-gray-500">Loading visual...</p>}
           </div>
         </div>
 
-        {/* returns Store Trend Visual */}
-        <div className="bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300">
+        {/* Segment Breakdown Visual */}
+        <div className="h-[300px] bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300">
           <h2 className="text-lg font-semibold mb-4">Forecast Analysis</h2>
           <div
-            className="h-64 flex items-center justify-center bg-gray-100 rounded"
+            className="md:h-56 lg:h-[220px] flex items-center justify-center bg-gray-100 rounded"
             ref={storeRef}
           >
             {!embedData && <p className="text-gray-500">Loading visual...</p>}
           </div>
         </div>
       </div>
-
-      {/* Single hidden container for report embedding */}
+  
+      {/* Hidden Report Container */}
       <div ref={hiddenReportRef} style={{ display: 'none' }}></div>
     </div>
   );

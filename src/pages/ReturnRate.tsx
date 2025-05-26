@@ -979,8 +979,8 @@ const handleStoreChange = (Segment: string) => {
       {/* Visuals Section */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
         {/* Category Distribution Visual */}
-        <div className="h-[300px] bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300">
-          <h2 className="text-lg font-semibold mb-4">Sales Analysis</h2>
+        <div className="h-[300px] bg-white p-6 rounded-lg shadow-md border border-gray-200">
+          <h2 className="text-lg font-semibold mb-2">Sales Analysis</h2>
           <div
             className="md:h-56 lg:h-[220px] flex items-center justify-center bg-gray-100 rounded"
             ref={categoryRef}
@@ -990,8 +990,8 @@ const handleStoreChange = (Segment: string) => {
         </div>
 
         {/* Segment Breakdown Visual */}
-        <div className="h-[300px] bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300">
-          <h2 className="text-lg font-semibold mb-4">Forecast Analysis</h2>
+        <div className="h-[300px] bg-white p-6 rounded-lg shadow-md border border-gray-200">
+          <h2 className="text-lg font-semibold mb-2">Forecast Analysis</h2>
           <div
             className="md:h-56 lg:h-[220px] flex items-center justify-center bg-gray-100 rounded"
             ref={storeRef}

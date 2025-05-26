@@ -22,16 +22,27 @@ export default function AuthCallback() {
 
   useEffect(() => {
     if (token) {
-      const payload = parseJwt(token);
-      const user = {
-        id: payload.sub,
-        email: payload.preferred_username,
-        name: payload.name,
-      };
-      setUser(user);
-      navigate('/');
+      try { // Add try...catch for parseJwt
+        const payload = parseJwt(token);
+
+        // **CORRECTION HERE:** Include the idToken in the user object
+        const user = {
+          id: payload.sub, // Use 'sub' claim as the unique user ID
+          email: payload.preferred_username,
+          name: payload.name,
+          idToken: token, // Store the actual token
+        };
+
+        setUser(user);
+        navigate('/');
+
+      } catch (error) {
+          console.error("Failed to parse JWT:", error);
+          navigate('/login?error=invalid_token'); // Redirect on parsing error
+      }
     } else {
-      navigate('/login');
+      console.error("Auth callback missing token");
+      navigate('/login?error=missing_token');
     }
   }, [token, setUser, navigate]);
 

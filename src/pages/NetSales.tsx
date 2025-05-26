@@ -960,7 +960,7 @@ const handleStoreChange = (Segment: string) => {
   
       {/* Metrics Section */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6 justify-items-center">
-        <div className="bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300 w-[230px] h-[100px] ml-12">
+        <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200 w-[230px] h-[100px] ml-12">
           <div className="flex items-center">
             <TrendingUp className="w-12 h-12 text-gray-500" />
             <div className="ml-4">
@@ -970,8 +970,7 @@ const handleStoreChange = (Segment: string) => {
           </div>
         </div>
 
-  
-        <div className="bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300 w-[230px] h-[100px] lg:col-start-3 ml-14">
+        <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200 w-[230px] h-[100px] lg:col-start-3 ml-14">
           <div className="flex items-center">
             <DollarSign className="w-12 h-12 text-gray-500" />
             <div className="ml-4">
@@ -981,12 +980,14 @@ const handleStoreChange = (Segment: string) => {
           </div>
         </div>
       </div>
-  
+
       {/* Visuals Section */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
         {/* Category Distribution Visual */}
-        <div className="h-[300px] bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300">
-          <h2 className="text-lg font-semibold mb-4">Store Breakdown</h2>
+        {/* Applied border, shadow, and border color from the first image */}
+        <div className="h-[300px] bg-white p-6 rounded-lg shadow-md border border-gray-200">
+          <h2 className="text-lg font-semibold mb-2">Store Breakdown</h2>
+          {/* Inner div style is kept as in the original second code, as the request was for the outer container */}
           <div
             className="md:h-56 lg:h-[220px] flex items-center justify-center bg-gray-100 rounded"
             ref={categoryRef}
@@ -996,8 +997,10 @@ const handleStoreChange = (Segment: string) => {
         </div>
 
         {/* Segment Breakdown Visual */}
-        <div className="h-[300px] bg-white p-6 rounded-lg shadow-lg border-2 border-gray-300">
-          <h2 className="text-lg font-semibold mb-4">Segment Breakdown</h2>
+        {/* Applied border, shadow, and border color from the first image */}
+        <div className="h-[300px] bg-white p-6 rounded-lg shadow-md border border-gray-200">
+          <h2 className="text-lg font-semibold mb-2">Segment Breakdown</h2>
+           {/* Inner div style is kept as in the original second code, as the request was for the outer container */}
           <div
             className="md:h-56 lg:h-[220px] flex items-center justify-center bg-gray-100 rounded"
             ref={storeRef}
@@ -1007,7 +1010,6 @@ const handleStoreChange = (Segment: string) => {
         </div>
       </div>
 
-  
       {/* Hidden Report Container */}
       <div ref={hiddenReportRef} style={{ display: 'none' }}></div>
     </div>

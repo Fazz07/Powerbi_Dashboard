@@ -5,6 +5,7 @@ import { useAuthStore } from '../store/authStore';
 import ModalWindow from '../components/ModalWindow';
 // Ensure Report type matches definition in ModalWindow, especially Report['id'] type (string or number)
 import { Report } from '../components/ModalWindow';
+import { fetchDashboardConfig, saveDashboardConfig } from '../api/dashboardApi';
 import {
   DndContext,
   closestCenter,
@@ -22,10 +23,17 @@ import {
 } from '@dnd-kit/sortable';
 import { SortableVisual } from '../components/DraggableComponent';
 
+const DEFAULT_VISUAL_ORDER: UnifiedVisualId[] = [
+  'categoryVisual',
+  'storeVisual',
+  'salesByStoreVisual',
+  'salesBySegmentVisual',
+];
+
 // Type Definitions
 type VisualKey = 'category' | 'store' | 'salesByStore' | 'salesBySegment';
 type VisualId = 'categoryVisual' | 'storeVisual' | 'salesByStoreVisual' | 'salesBySegmentVisual';
-type UnifiedVisualId = VisualId | string; // Allow dynamic IDs as strings
+export type UnifiedVisualId = VisualId | string; // Allow dynamic IDs as strings
 
 interface EmbedData {
   embedUrl: string;
@@ -80,6 +88,8 @@ export default function Dashboard() {
   const apiUrl = import.meta.env.VITE_API_URL || '';
   const powerbiServiceRef = useRef<powerbi.service.Service | null>(null);
 
+  const { user } = useAuthStore();
+
   // Refs for static visuals' containers
   const visualRefs = {
     category: useRef<HTMLDivElement>(null),
@@ -95,6 +105,9 @@ export default function Dashboard() {
   const dynamicVisualInstances = useRef<Record<string, powerbi.Embed>>({}); // Holds dynamic visual instances, keyed by dynamicId
 
   // --- State ---
+  const [isLoadingConfig, setIsLoadingConfig] = useState(true); // New loading state
+  const [isSavingConfig, setIsSavingConfig] = useState(false); // New saving state
+  const [saveError, setSaveError] = useState<string | null>(null); // State for save errors
   const [embedData, setEmbedData] = useState<EmbedData | null>(null);
   const [showFilters, setShowFilters] = useState<boolean>(false);
   const [activeFilterCategory, setActiveFilterCategory] = useState<string>('Store'); // Tracks which filter dropdown is open
@@ -103,13 +116,7 @@ export default function Dashboard() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedReports, setSelectedReports] = useState<Report[]>([]); // Holds the selected dynamic reports' data
 
-  // Unified order of all visuals (static and dynamic) for rendering and DnD
-  const [visualOrder, setVisualOrder] = useState<UnifiedVisualId[]>([
-    'categoryVisual',
-    'storeVisual',
-    'salesByStoreVisual',
-    'salesBySegmentVisual',
-  ]);
+  const [visualOrder, setVisualOrder] = useState<UnifiedVisualId[]>(DEFAULT_VISUAL_ORDER);
 
   // Tracks whether each static visual has been embedded *once* to prevent re-embedding
   const [staticVisualsEmbedded, setStaticVisualsEmbedded] = useState<Record<VisualKey, boolean>>({
@@ -211,7 +218,74 @@ export default function Dashboard() {
     },
   ], []);
 
+
+  // --- Debounced Save Function ---
+  const debouncedSave = useCallback(
+   debounce(async (order: UnifiedVisualId[], reports: Report[]) => {
+       if (!user) return; // Should not happen if called correctly
+       setIsSavingConfig(true);
+       setSaveError(null);
+       console.log("Attempting to save dashboard config...");
+       try {
+           await saveDashboardConfig(order, reports);
+           console.log("Dashboard config saved successfully.");
+       } catch (error) {
+           console.error("Failed to save dashboard config:", error);
+           setSaveError("Failed to save layout changes.");
+           // Optionally: revert local state or notify user more prominently
+       } finally {
+           setIsSavingConfig(false);
+       }
+   }, 1000), // Debounce saves by 1 second
+   [user] // Recreate if user changes (login/logout)
+  );
+
   // --- Effects ---
+
+    // --- Load Config Effect ---
+    useEffect(() => {
+      if (!user) {
+        // If user logs out while on dashboard, reset to default
+        setVisualOrder(DEFAULT_VISUAL_ORDER);
+        setSelectedReports([]);
+        // Reset dynamic refs maybe?
+        dynamicVisualRefs.current = {};
+        setIsLoadingConfig(false);
+        return;
+      }
+
+      const loadConfig = async () => {
+        setIsLoadingConfig(true);
+        console.log("Fetching user dashboard config...");
+        try {
+          const config = await fetchDashboardConfig();
+          if (config) {
+            console.log("User config loaded:", config);
+            setVisualOrder(config.visualOrder);
+            setSelectedReports(config.selectedDynamicReports);
+            // Ensure refs exist for loaded dynamic reports
+            config.selectedDynamicReports.forEach(report => {
+                const dynamicId = getDynamicVisualId(report.id);
+                if (!dynamicVisualRefs.current[dynamicId]) {
+                    dynamicVisualRefs.current[dynamicId] = React.createRef<HTMLDivElement>();
+                }
+            });
+          } else {
+            console.log("No saved config found, using default layout.");
+            setVisualOrder(DEFAULT_VISUAL_ORDER);
+            setSelectedReports([]);
+          }
+        } catch (error) {
+          console.error("Error loading dashboard config:", error);
+          // Keep default layout on error
+          setVisualOrder(DEFAULT_VISUAL_ORDER);
+          setSelectedReports([]);
+        } finally {
+          setIsLoadingConfig(false);
+        }
+      };
+      loadConfig();
+    }, [user]); // Run when user changes (login)
 
   // Initialize PowerBI Service on mount
   useEffect(() => {
@@ -271,11 +345,17 @@ export default function Dashboard() {
       setVisualOrder((items) => {
         const oldIndex = items.findIndex(id => id === active.id);
         const newIndex = items.findIndex(id => id === over.id);
-        if (oldIndex === -1 || newIndex === -1) return items; // Safety check
-        return arrayMove(items, oldIndex, newIndex);
+        if (oldIndex === -1 || newIndex === -1) return items;
+        const newOrder = arrayMove(items, oldIndex, newIndex);
+
+        // Trigger debounced save after state update
+        debouncedSave(newOrder, selectedReports); // Use current selectedReports
+
+        return newOrder;
       });
     }
-  }, []);
+  }, [selectedReports, debouncedSave]); // Add dependencies
+
 
   // ADD THIS: Runs ONCE on mount to clear stale data
   useEffect(() => {
@@ -672,6 +752,8 @@ export default function Dashboard() {
 
     // Prevent embedding if conditions not met
     if (!embedData || !ref.current || staticVisualsEmbedded[key] || !powerbiServiceRef.current) {
+       // Add detailed logging here
+       console.log(`Skipping static embed for ${key}: EmbedData?`, !!embedData, `Ref?`, !!ref?.current, `AlreadyEmbedded?`, !!staticVisualsEmbedded[key], `Service?`, !!powerbiServiceRef.current);
       return;
     }
 
@@ -724,7 +806,9 @@ export default function Dashboard() {
     } catch (error) {
       console.error(`Error initiating embed for static visual ${key} (${id}):`, error);
     }
-  }, [embedData, staticVisualsEmbedded, handleVisualSelection, clearCrossFilters]); // Ensure handlers are dependencies
+  // Removed staticVisualsEmbedded from deps, embedding attempt should be controlled by the calling effect
+  }, [embedData, handleVisualSelection, clearCrossFilters]);
+
 
   /**
    * Embeds a single dynamic visual based on its Report data.
@@ -734,7 +818,9 @@ export default function Dashboard() {
         const ref = dynamicVisualRefs.current[dynamicId];
 
         // Prevent embedding if conditions not met
+        // Check if instance already exists
         if (!embedData || !powerbiServiceRef.current || !ref?.current || dynamicVisualInstances.current[dynamicId]) {
+             console.log(`Skipping dynamic embed for ${dynamicId}: EmbedData?`, !!embedData, `Service?`, !!powerbiServiceRef.current, `Ref?`, !!ref?.current, `InstanceExists?`, !!dynamicVisualInstances.current[dynamicId]);
             return;
         }
 
@@ -761,7 +847,9 @@ export default function Dashboard() {
             default:
                 console.warn(`No embed configuration defined for dynamic report title: ${report.title}. Skipping embed.`);
                 // render a placeholder in the container
-                ref.current.innerHTML = `<div class="p-4 text-center text-red-600">Configuration missing for "${report.title}"</div>`;
+                if(ref.current) { // Check ref before assigning innerHTML
+                   ref.current.innerHTML = `<div class="p-4 text-center text-red-600">Configuration missing for "${report.title}"</div>`;
+                }
                 return; // Stop embedding if config is missing
         }
         // --- End Configuration Mapping ---
@@ -814,7 +902,8 @@ export default function Dashboard() {
                  ref.current.innerHTML = `<div class="p-4 text-center text-red-600">Error embedding "${report.title}"</div>`;
              }
         }
-  }, [embedData, handleVisualSelection, clearCrossFilters]); // Ensure handlers are dependencies
+   // Removed instance check from dependencies, calling effect controls if embed is attempted
+  }, [embedData, handleVisualSelection, clearCrossFilters]);
 
 
   // --- Interaction Setup ---
@@ -887,56 +976,147 @@ export default function Dashboard() {
    * Handles adding new reports from the modal.
    * Updates selected reports state, adds new visuals to the order, and creates refs.
    */
-  const handleAddReports = (newlySelected: Report[]) => {
-    // Filter out reports that are already selected to avoid duplicates
-    const uniqueNewReports = newlySelected.filter(
-        (newReport) => !selectedReports.some((existingReport) => String(existingReport.id) === String(newReport.id)) // Compare as strings for safety
-    );
+  // --- Add Report Handler (Modify to trigger save) ---
+   const handleAddReports = useCallback((newlySelected: Report[]) => {
+        const uniqueNewReports = newlySelected.filter(
+            (newReport) => !selectedReports.some((existingReport) => String(existingReport.id) === String(newReport.id))
+        );
 
-    if (uniqueNewReports.length > 0) {
-        console.log(`Adding ${uniqueNewReports.length} new reports.`);
-        // Update the list of selected reports data
-        setSelectedReports(prev => [...prev, ...uniqueNewReports]);
+        if (uniqueNewReports.length > 0) {
+            const updatedReports = [...selectedReports, ...uniqueNewReports];
+            const newDynamicIds = uniqueNewReports.map(report => getDynamicVisualId(report.id));
+            const updatedOrder = [...visualOrder, ...newDynamicIds];
 
-        // Get the new dynamic IDs (using the helper function)
-        const newDynamicIds = uniqueNewReports.map(report => getDynamicVisualId(report.id));
+            // Create refs first
+            newDynamicIds.forEach(id => {
+                if (!dynamicVisualRefs.current[id]) {
+                    dynamicVisualRefs.current[id] = React.createRef<HTMLDivElement>();
+                }
+            });
 
-        // Add the new dynamic IDs to the end of the visual order
-        setVisualOrder(prevOrder => [...prevOrder, ...newDynamicIds]);
+            // Update state
+            setSelectedReports(updatedReports);
+            setVisualOrder(updatedOrder);
 
-        // Create refs for the newly added visuals if they don't exist
-        newDynamicIds.forEach(id => {
-            if (!dynamicVisualRefs.current[id]) {
-                dynamicVisualRefs.current[id] = React.createRef<HTMLDivElement>();
-            }
-        });
-    } else {
-        console.log("No new unique reports selected.");
+            // Trigger save immediately (or debounce if preferred)
+            // Using immediate save here for simplicity after adding
+             saveDashboardConfig(updatedOrder, updatedReports)
+               .then(() => console.log("Config saved after adding reports."))
+               .catch(err => console.error("Error saving after adding reports:", err));
+             // Or use: debouncedSave(updatedOrder, updatedReports);
+
+        } else {
+            console.log("No new unique reports selected.");
+        }
+
+        closeModal();
+   }, [selectedReports, visualOrder]); // Removed debouncedSave if saving immediately
+
+
+     // --- Rendering Helpers ---
+
+  /**
+   * Helper function to get the necessary data (id, title, ref, type) for a visual
+   * based on its ID (static or dynamic) present in the visualOrder state.
+   */
+  const getVisualItemData = useCallback((id: UnifiedVisualId): VisualItem | null => {
+    // Check if it's a known static visual ID
+    const staticConfig = staticVisualConfigs.find(cfg => cfg.id === id);
+    if (staticConfig) {
+        return {
+            id: staticConfig.id, title: staticConfig.title, type: 'static',
+            ref: visualRefs[staticConfig.key], config: staticConfig
+        };
     }
 
-    closeModal();
-  };
+    // Check if it's a dynamic visual ID (starts with 'dynamic-')
+    if (typeof id === 'string' && id.startsWith('dynamic-')) {
+        const reportIdStr = id.substring('dynamic-'.length);
 
+        // Find the corresponding report data in selectedReports
+        // Compare IDs as strings for robustness against number/string type differences
+        const report = selectedReports.find(r => String(r.id) === reportIdStr);
+
+        if (report) {
+            // Ensure the ref exists for this dynamic visual (should have been created by handleAddReports/embed effect)
+            if (!dynamicVisualRefs.current[id]) {
+                console.warn(`Ref for dynamic visual ${id} was missing during render prep. Creating now.`);
+                dynamicVisualRefs.current[id] = React.createRef<HTMLDivElement>();
+            }
+             return {
+                 id: id, title: report.title, type: 'dynamic',
+                 ref: dynamicVisualRefs.current[id], report: report
+             };
+        }
+    }
+
+    // ID not found or doesn't match known patterns
+    console.warn(`Could not find visual data for ID during render: ${id}`);
+    return null;
+
+}, [staticVisualConfigs, selectedReports]); // Depends on static configs and selected dynamic reports data
+
+
+ /**
+  * Memoized array of VisualItem objects, ordered according to visualOrder state.
+  * Used directly in the rendering loop.
+  */
+ const visualItemsForRender: VisualItem[] = useMemo(() => {
+      return visualOrder
+          .map(id => getVisualItemData(id)) // Get data for each ID in the current order
+          .filter((item): item is VisualItem => item !== null); // Filter out any null results (safety check)
+ }, [visualOrder, getVisualItemData]); // Re-calculate when order changes or data retrieval logic changes
 
   // --- Core Effects for Embedding and Interaction ---
 
-  // Embed static visuals when embedData is ready and they haven't been embedded yet
+  // Effect to Embed STATIC visuals based on current render order
   useEffect(() => {
-    if (!embedData) return;
-    console.log("Checking static visuals for embedding...");
-    staticVisualConfigs.forEach(config => {
-      if (!staticVisualsEmbedded[config.key]) {
-        embedStaticVisual(config);
-      }
-    });
-  }, [embedData, staticVisualConfigs, embedStaticVisual, staticVisualsEmbedded]); // Re-run if embed data or configs change, or if embed status changes
+    // Wait until embed token is ready AND config loading is finished
+    if (!embedData || isLoadingConfig) {
+      console.log("Static embed waiting: EmbedData?", !!embedData, "Config Loading?", isLoadingConfig);
+      return;
+    }
 
-  // Embed dynamic visuals when embedData is ready OR when selectedReports changes
+    console.log("Checking static visuals in current render order for embedding...");
+
+    // Iterate over the visuals currently determined to be rendered based on visualOrder
+    visualItemsForRender.forEach(item => {
+        // Only try to embed visuals of type 'static' that have config
+        if (item.type === 'static' && item.config) {
+            const config = item.config;
+            const key = config.key;
+
+            // Check if this specific static visual hasn't been embedded yet
+            if (!staticVisualsEmbedded[key]) {
+                console.log(`Attempting embed for static visual in order: ${key} (${config.id})`);
+                // Call the embed function (which checks ref.current internally)
+                embedStaticVisual(config);
+            } else {
+               // console.log(`Static visual ${key} already marked as embedded.`); // Optional logging
+            }
+        }
+    });
+
+  // Dependencies: Re-run this check if embed data, loading status, items to render,
+  // the embed function itself changes. Removed staticVisualsEmbedded dependency.
+  }, [
+      embedData,
+      isLoadingConfig,
+      visualItemsForRender, // Depends on visualOrder, selectedReports, getVisualItemData
+      embedStaticVisual,    // Depends on its own dependencies
+      // staticVisualsEmbedded // REMOVED
+  ]);
+
+  // Effect to Embed DYNAMIC visuals
   useEffect(() => {
-    if (!embedData || selectedReports.length === 0) return;
+    // Wait for embed data AND config loading to finish
+    if (!embedData || isLoadingConfig || selectedReports.length === 0) {
+        console.log("Dynamic embed waiting: EmbedData?", !!embedData, "Config Loading?", isLoadingConfig, "Reports?", selectedReports.length);
+        return;
+    }
     console.log("Checking dynamic visuals for embedding...");
 
-    // Ensure refs exist for all selected reports (might be redundant if handleAddReports is robust, but safe)
+    // Ensure refs exist (safe check)
     selectedReports.forEach(report => {
         const dynamicId = getDynamicVisualId(report.id);
         if (!dynamicVisualRefs.current[dynamicId]) {
@@ -945,202 +1125,187 @@ export default function Dashboard() {
         }
     });
 
-    // Attempt to embed each selected dynamic visual if not already embedded
+    // Attempt embed - only if instance doesn't exist yet
     selectedReports.forEach(report => {
         const dynamicId = getDynamicVisualId(report.id);
-        if (!dynamicVisualInstances.current[dynamicId]) { // Check if instance already exists
+        if (!dynamicVisualInstances.current[dynamicId]) {
             embedDynamicVisual(report);
+        } else {
+           // console.log(`Dynamic visual ${dynamicId} already has an instance.`); // Optional logging
         }
     });
 
-    // Potential Cleanup: If reports could be removed, add logic here to find
-    // dynamicVisuals whose IDs are no longer in selectedReports and destroy/remove their instances/refs.
+  // Dependencies: Re-run if embed data, loading status, reports list, or embed function changes.
+  }, [embedData, isLoadingConfig, selectedReports, embedDynamicVisual]);
 
-  }, [embedData, selectedReports, embedDynamicVisual]); // Re-run if embed data or selected reports change
-
-  // Setup double-click listeners effect
-  useEffect(() => {
-    console.log("Setting up double-click listeners for static visuals.");
-    // Execute setup and get the aggregate cleanup function
-    const cleanup = setupDoubleClickReset();
-
-    // Return the aggregate cleanup function to be run on unmount or dependency change
-    return () => {
-        cleanup();
-        console.log("Cleaned up double-click listeners.");
-    };
-  }, [setupDoubleClickReset]); // Re-run ONLY if the setupDoubleClickReset function itself changes (due to its dependencies)
-
-  // Apply filters whenever selectedCategory or selectedStore changes (and embedData is ready)
-  useEffect(() => {
-    if (embedData) { // Only apply filters once embed is possible
-      console.log("Applying filters due to state change (selectedCategory/selectedStore).");
-      applyFilters();
-    }
-  }, [selectedCategory, selectedStore, embedData, applyFilters]); // Run when filters or embedData change
+    // Effect for applying filters (runs when filters change or after load)
+    useEffect(() => {
+      // Only apply filters once embed is possible AND config is loaded
+      if (embedData && !isLoadingConfig) {
+          console.log("Applying filters due to state change (selectedCategory/selectedStore/load).");
+          applyFilters();
+      }
+    // Dependencies: Filter state, embed readiness, loading status, and the apply function itself
+    }, [selectedCategory, selectedStore, embedData, isLoadingConfig, applyFilters]);
 
 
   // --- Data Exposure & Loading State Effects ---
 
-  // Expose data to window object for potential external use
+  // Effect for Data Exposure
   useEffect(() => {
-    // Check if embed data exists and if there's at least one visual instance (static or dynamic)
-    if (embedData && (Object.keys(visualInstancesRef.current).length > 0 || Object.keys(dynamicVisualInstances.current).length > 0)) {
-      try {
-        // Clear previous state in authStore (if necessary)
-        useAuthStore.getState().setParsedComponent('none');
-        useAuthStore.getState().setParsedComponentTwo('none');
-
-        // Construct data payload including filters and visual info
-        const powerBIData = {
-          pageName: 'dashboard', // Correct page identifier
-          reportId: embedData.reportId,
-          filters: [
-              { table: 'Store', column: 'Store', value: selectedCategory },
-              { table: 'Product', column: 'Segment', value: selectedStore }
-          ],
-          visuals: [ // Information about all currently rendered visuals
-              // Static visuals
-              ...staticVisualConfigs.map(config => ({
-                name: config.visualName, // Actual visual name in PBI
-                key: config.key,         // Internal key ('category', 'store')
-                id: config.id,           // Unique component ID ('categoryVisual')
-                title: config.title,     // Display title
-                type: 'static',
-                // Example data structure for the consumer
-                data: { visualType: config.key, visible: !!visualInstancesRef.current[config.key] }
-              })),
-              // Dynamic visuals <-- ADD THIS SECTION
-              ...selectedReports.map(report => {
-                  const dynamicId = getDynamicVisualId(report.id);
-                  const visualInstance = dynamicVisualInstances.current[dynamicId];
-                  // Attempt to get the actual visual name used during embedding
-                  // This relies on the PBI client library structure, might need adjustment
-                  const visualNameUsed = (visualInstance as any)?.config?.visualName || 'unknown';
-
-                  return {
-                    name: visualNameUsed, // Actual visual name in PBI (best effort)
-                    key: dynamicId,       // Unique component ID ('dynamic-123')
-                    id: dynamicId,        // Unique component ID ('dynamic-123')
-                    title: report.title,  // Display title from modal
-                    type: 'dynamic',
-                    // Example data structure
-                    data: { visualType: report.title, visible: !!visualInstance } // Use report title for type info
-                  };
-              })
-          ]
-        };
-
-        // Assign data and instances to window object (NO CHANGE HERE)
-        (window as any).__powerBIData = powerBIData;
-        (window as any).__powerBIVisualInstances = { ...visualInstancesRef.current, ...dynamicVisualInstances.current };
-        if (powerbiServiceRef.current) {
-            (window as any).powerbi = powerbiServiceRef.current;
-        }
-        console.log('Dashboard: PowerBI data exposed to window:', powerBIData);
-
-      } catch (error) {
-        console.error('Dashboard: Error exposing PowerBI data to window:', error);
-      }
+    // Wait for config load before exposing data
+    if (isLoadingConfig) {
+        console.log("Data exposure waiting for config load.");
+        return;
     }
 
-    // Cleanup function: Remove data from window object (NO CHANGE HERE)
+    // Check if embed data exists and if there's at least one visual instance
+    const anyStaticInstance = Object.values(visualInstancesRef.current).some(v => !!v);
+    const anyDynamicInstance = Object.values(dynamicVisualInstances.current).some(v => !!v);
+
+    // Only expose if embed data exists AND there's something embedded
+    if (embedData && (anyStaticInstance || anyDynamicInstance)) {
+        try {
+            const powerBIData = {
+                pageName: 'dashboard',
+                reportId: embedData.reportId,
+                filters: [
+                    { table: 'Store', column: 'Store', value: selectedCategory },
+                    { table: 'Product', column: 'Segment', value: selectedStore }
+                ],
+                // Base exposure on visualItemsForRender to reflect current layout
+                visuals: visualItemsForRender.map(item => {
+                    const visualInstance = item.type === 'static'
+                      ? visualInstancesRef.current[item.config!.key]
+                      : dynamicVisualInstances.current[item.id];
+                    // Determine the actual visual name used (best effort)
+                    const visualNameUsed = item.type === 'static'
+                      ? item.config!.visualName
+                      : (visualInstance as any)?.config?.visualName || 'unknown_dynamic'; // Check instance config if possible
+
+                    return {
+                        name: visualNameUsed,
+                        key: item.type === 'static' ? item.config!.key : item.id,
+                        id: item.id,
+                        title: item.title,
+                        type: item.type,
+                        data: { // Example data structure
+                            visualType: item.type === 'static' ? item.config!.key : item.report?.title || 'unknown_dynamic_report',
+                            visible: !!visualInstance // Is an instance currently stored?
+                        }
+                    };
+                })
+            };
+
+            (window as any).__powerBIData = powerBIData;
+            (window as any).__powerBIVisualInstances = { ...visualInstancesRef.current, ...dynamicVisualInstances.current };
+            if (powerbiServiceRef.current) {
+                (window as any).powerbi = powerbiServiceRef.current;
+            }
+            console.log('Dashboard: PowerBI data exposed to window:', powerBIData);
+
+        } catch (error) {
+            console.error('Dashboard: Error exposing PowerBI data to window:', error);
+        }
+    } else {
+         console.log("Data exposure skipped: EmbedData?", !!embedData, "Instances?", anyStaticInstance || anyDynamicInstance);
+    }
+
+    // Cleanup - remains the same
     return () => {
-      console.log('Dashboard unmounting. Cleaning up window/store data.');
+      console.log('Dashboard data exposure cleanup.');
+      // Clear window properties if necessary, though mount effect should handle it
       delete (window as any).__powerBIData;
       delete (window as any).__powerBIVisualInstances;
-      // delete (window as any).powerbi; // Optional cleanup
-      // Reset loading state on unmount as well
-      // useAuthStore.getState().setVisualsLoaded(false); // Already done in mount effect of next component
-      // Clear specific dashboard parse states
-       useAuthStore.getState().setParsedComponent('none');
-       useAuthStore.getState().setParsedComponentTwo('none');
+      // delete (window as any).powerbi;
     };
-    // Dependencies remain the same - this effect re-runs when filters or visuals change
-  }, [embedData, selectedCategory, selectedStore, staticVisualConfigs, selectedReports]); // Dependencies are correct (already includes selectedReports)
+  // Dependencies: Re-run when data/filters/visuals/loading change
+  }, [
+      embedData, isLoadingConfig, selectedCategory, selectedStore,
+      staticVisualConfigs, selectedReports, visualItemsForRender // visualItemsForRender covers visualOrder changes
+  ]);
 
 
-   // Update global loading state based on static visuals' render status
-   useEffect(() => {
-    // Check if ALL static visuals have reported 'rendered'
-    const allStaticVisualsRendered = staticVisualConfigs.every(config => visualRendered[config.key]);
+  // Effect for global loading state
+  useEffect(() => {
+    // Wait for config load before determining final load state
+    if (isLoadingConfig) {
+        useAuthStore.getState().setVisualsLoaded(false);
+        console.log("Visual loading state: Waiting for config load.");
+        return;
+    }
 
-    // Check if ALL currently selected dynamic visuals have reported 'rendered'
-    // Ensure a ref/instance potentially exists AND its render state is true
-    const allDynamicVisualsRendered = selectedReports.length === 0 || selectedReports.every(report => {
+    // Config loaded, now check renders based on current visualOrder
+    // Only check static visuals that are *supposed* to be in the current order
+    const staticVisualsInCurrentOrder = staticVisualConfigs.filter(cfg => visualOrder.includes(cfg.id));
+    const allStaticInOrderRendered = staticVisualsInCurrentOrder.length === 0 || staticVisualsInCurrentOrder.every(config => visualRendered[config.key]);
+
+    // Check dynamic visuals based on selectedReports
+    const allDynamicRendered = selectedReports.length === 0 || selectedReports.every(report => {
         const dynamicId = getDynamicVisualId(report.id);
-        // Check if it's in the render state AND is true
+        // Ensure the dynamic visual is actually rendered (not just attempted)
         return dynamicVisualsRendered[dynamicId] === true;
     });
 
+    const allLoaded = allStaticInOrderRendered && allDynamicRendered;
+    useAuthStore.getState().setVisualsLoaded(allLoaded);
 
-    if (allStaticVisualsRendered && allDynamicVisualsRendered) {
-      useAuthStore.getState().setVisualsLoaded(true);
-      console.log('All STATIC and DYNAMIC PowerBI visuals reported rendered.'); // Updated log
+    if (allLoaded) {
+        console.log('All currently ordered STATIC and DYNAMIC PowerBI visuals reported rendered.');
     } else {
-      useAuthStore.getState().setVisualsLoaded(false);
-      // Log which ones are pending
-      console.log('Waiting for visuals to render. Static:', allStaticVisualsRendered, 'Dynamic:', allDynamicVisualsRendered);
+        // More detailed logging for debugging
+        console.log(
+            'Waiting for visuals to render. Config Loaded:', !isLoadingConfig,
+            'Static Check (Count:', staticVisualsInCurrentOrder.length, 'Rendered:', allStaticInOrderRendered, ')',
+            'Dynamic Check (Count:', selectedReports.length, 'Rendered:', allDynamicRendered, ')'
+        );
+         // Log specific pending visuals
+         staticVisualsInCurrentOrder.forEach(config => {
+             if (!visualRendered[config.key]) console.log(` - Pending static: ${config.key}`);
+         });
+         selectedReports.forEach(report => {
+             const dynamicId = getDynamicVisualId(report.id);
+             if (dynamicVisualsRendered[dynamicId] !== true) console.log(` - Pending dynamic: ${dynamicId} (${report.title})`);
+         });
     }
-  }, [visualRendered, dynamicVisualsRendered, staticVisualConfigs, selectedReports]);
+  // Depend on render states, config loading status, and the lists defining what *should* be rendered
+  }, [
+      visualRendered, dynamicVisualsRendered, isLoadingConfig,
+      staticVisualConfigs, selectedReports, visualOrder // visualOrder needed to check relevant static visuals
+  ]);
 
 
-  // --- Rendering Helpers ---
-
-  /**
-   * Helper function to get the necessary data (id, title, ref, type) for a visual
-   * based on its ID (static or dynamic) present in the visualOrder state.
-   */
-  const getVisualItemData = useCallback((id: UnifiedVisualId): VisualItem | null => {
-      // Check if it's a known static visual ID
-      const staticConfig = staticVisualConfigs.find(cfg => cfg.id === id);
-      if (staticConfig) {
-          return {
-              id: staticConfig.id, title: staticConfig.title, type: 'static',
-              ref: visualRefs[staticConfig.key], config: staticConfig
-          };
-      }
-
-      // Check if it's a dynamic visual ID (starts with 'dynamic-')
-      if (typeof id === 'string' && id.startsWith('dynamic-')) {
-          const reportIdStr = id.substring('dynamic-'.length);
-
-          // Find the corresponding report data in selectedReports
-          // Compare IDs as strings for robustness against number/string type differences
-          const report = selectedReports.find(r => String(r.id) === reportIdStr);
-
-          if (report) {
-              // Ensure the ref exists for this dynamic visual (should have been created by handleAddReports/embed effect)
-              if (!dynamicVisualRefs.current[id]) {
-                  console.warn(`Ref for dynamic visual ${id} was missing during render prep. Creating now.`);
-                  dynamicVisualRefs.current[id] = React.createRef<HTMLDivElement>();
-              }
-               return {
-                   id: id, title: report.title, type: 'dynamic',
-                   ref: dynamicVisualRefs.current[id], report: report
-               };
-          }
-      }
-
-      // ID not found or doesn't match known patterns
-      console.warn(`Could not find visual data for ID during render: ${id}`);
-      return null;
-
-  }, [staticVisualConfigs, selectedReports]); // Depends on static configs and selected dynamic reports data
+  // *** REMOVED DUPLICATE useEffect for global loading state ***
 
 
-   /**
-    * Memoized array of VisualItem objects, ordered according to visualOrder state.
-    * Used directly in the rendering loop.
-    */
-   const visualItemsForRender: VisualItem[] = useMemo(() => {
-        return visualOrder
-            .map(id => getVisualItemData(id)) // Get data for each ID in the current order
-            .filter((item): item is VisualItem => item !== null); // Filter out any null results (safety check)
-   }, [visualOrder, getVisualItemData]); // Re-calculate when order changes or data retrieval logic changes
+  // Setup double-click listeners effect
+  useEffect(() => {
+    // Only setup listeners once config is loaded to ensure refs are stable
+    if (!isLoadingConfig) {
+        console.log("Setting up double-click listeners for static visuals.");
+        const cleanup = setupDoubleClickReset();
+        return () => {
+            cleanup();
+            console.log("Cleaned up double-click listeners.");
+        };
+    }
+  }, [isLoadingConfig, setupDoubleClickReset]); // Added isLoadingConfig
 
 
   // --- Render ---
+  if (isLoadingConfig) {
+    return (
+      <div className="flex justify-center items-center h-screen">
+        {/* Consider adding a more visually appealing loader/spinner */}
+        <svg className="animate-spin h-10 w-10 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <p className="ml-3 text-gray-600">Loading Dashboard Layout...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="p-4 md:p-6">
       {/* Dashboard Header */}
@@ -1149,13 +1314,13 @@ export default function Dashboard() {
           Dashboard
         </h1>
       </div>
-  
+
       {/* Sticky Filter Controls */}
-      <div className="sticky top-0 z-10 bg-transparent py-2 mb-4 mt-[-23px]">
+      <div className="sticky top-0 z-10 bg-gray-100/80 backdrop-blur-sm py-2 mb-4 mt-[-23px] border-b border-gray-200"> {/* Adjusted style */}
         <div className="flex flex-col sm:flex-row justify-between items-center">
           {/* Empty placeholder for alignment (if needed) */}
-          <div className="hidden sm:block" />
-  
+          <div className="hidden sm:block flex-1" /> {/* Added flex-1 */}
+
           {/* Filter Buttons Area */}
           <div className="flex gap-2 flex-wrap justify-center sm:justify-end">
             {/* Store Filter Button and Dropdown */}
@@ -1261,7 +1426,13 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
-  
+
+
+      {/* Saving Indicator / Error Message */}
+      {isSavingConfig && <div className="text-center text-gray-500 my-2">Saving layout...</div>}
+      {saveError && <div className="text-center text-red-500 my-2">{saveError}</div>}
+
+
       {/* Unified Drag and Drop Grid for All Visuals */}
       <DndContext
         sensors={sensors}
@@ -1277,56 +1448,41 @@ export default function Dashboard() {
                 title={visualItem.title}
               >
                 <div
-                  className="h-48 sm:h-56 md:h-64 lg:h-[200px] flex items-center justify-center bg-white rounded-lg overflow-hidden shadow"
+                  className="h-48 sm:h-56 md:h-64 lg:h-[200px] flex items-center justify-center bg-white rounded-lg overflow-hidden shadow-md border border-gray-200" // Added border/shadow
                   ref={visualItem.ref}
                 >
+                   {/* Improved Loading State inside visual */}
                   {!embedData && (
-                    <div className="text-center p-4">
-                      <svg
-                        className="animate-spin h-8 w-8 text-gray-500 mx-auto"
-                        xmlns="http://www.w3.org/2000/svg"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                      >
-                        <circle
-                          className="opacity-25"
-                          cx="12"
-                          cy="12"
-                          r="10"
-                          stroke="currentColor"
-                          strokeWidth="4"
-                        ></circle>
-                        <path
-                          className="opacity-75"
-                          fill="currentColor"
-                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        ></path>
-                      </svg>
-                      <p className="text-gray-500 dark:text-gray-400 mt-2 text-sm">
-                        Loading Visual...
-                      </p>
-                    </div>
-                  )}
+                     <div className="text-center p-4 text-gray-500">
+                       <svg className="animate-spin h-6 w-6 mx-auto mb-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                       </svg>
+                       Loading Visual...
+                     </div>
+                   )}
+                   {/* Placeholder if embed fails - could check specific error state */}
+                   {/* { embedErrorState[visualItem.id] && <div className="p-4 text-red-500">Error loading visual.</div> } */}
                 </div>
               </SortableVisual>
             ))}
           </div>
         </SortableContext>
       </DndContext>
-  
+
       {/* Add Report Section */}
       <div className="mt-8 flex justify-center">
         <button
           onClick={openModal}
-          className="w-auto h-auto text-white px-5 py-2.5 shadow-md flex items-center justify-center space-x-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-indigo-500 rounded-full transition-colors duration-150"
+          className="w-[135px] h-[39px] text-white px-5 py-2.5 shadow-md flex items-center justify-center space-x-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-indigo-500 rounded-full transition-colors duration-150 hover:bg-gray-700" // Adjusted hover
           style={{ backgroundColor: "rgb(54, 71, 95)" }}
           title="Add more visuals to the dashboard"
         >
-          <Plus className="w-4 h-4" />
-          <span className="text-sm font-medium">Add Report</span>
+          <Plus className="w-[16px] h-[16px]" />
+          <span className="text-[13px] font-medium">Add Report</span>
         </button>
       </div>
-  
+
       {/* Modal Window for selecting reports */}
       <ModalWindow
         isOpen={isModalOpen}
@@ -1335,4 +1491,20 @@ export default function Dashboard() {
       />
     </div>
   );
+}
+
+
+// Add a simple debounce utility function (or use lodash.debounce)
+function debounce<T extends (...args: any[]) => void>(func: T, wait: number): (...args: Parameters<T>) => void {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  return (...args: Parameters<T>): void => {
+      const later = () => {
+          timeout = null;
+          func(...args);
+      };
+      if (timeout !== null) {
+          clearTimeout(timeout);
+      }
+      timeout = setTimeout(later, wait);
+  };
 }
